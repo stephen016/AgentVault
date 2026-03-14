@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import pytest
 
@@ -171,3 +172,70 @@ async def test_get_dependency_graph(vault: AsyncVault):
     assert graph["researcher"]["description"] == "Does research"
     assert graph["writer"]["produces"] == {"report": str}
     assert graph["writer"]["consumes"] == {"findings": str}
+
+
+# 16. test_generic_type_list_str
+async def test_generic_type_list_str(vault: AsyncVault):
+    """Generic types like list[str] should be validated correctly."""
+    vault.register_agent(AgentContract(
+        name="indexer",
+        produces={"tags": list[str]},
+    ))
+    vault.set_enforcement("strict")
+
+    # Valid: list of strings
+    entry = await vault.put("tags", ["python", "rust"], agent="indexer")
+    assert entry.value == ["python", "rust"]
+
+    # Invalid: list of ints
+    with pytest.raises(ContractViolationError, match="expected type list\\[str\\]"):
+        await vault.put("tags", [1, 2, 3], agent="indexer")
+
+    # Invalid: not a list at all
+    with pytest.raises(ContractViolationError, match="expected type list\\[str\\]"):
+        await vault.put("tags", "not-a-list", agent="indexer")
+
+
+# 17. test_generic_type_dict
+async def test_generic_type_dict(vault: AsyncVault):
+    """dict[str, int] should validate keys and values."""
+    vault.register_agent(AgentContract(
+        name="counter",
+        produces={"counts": dict[str, int]},
+    ))
+    vault.set_enforcement("strict")
+
+    # Valid
+    entry = await vault.put("counts", {"a": 1, "b": 2}, agent="counter")
+    assert entry.value == {"a": 1, "b": 2}
+
+    # Invalid value types
+    with pytest.raises(ContractViolationError):
+        await vault.put("counts", {"a": "not-int"}, agent="counter")
+
+
+# 18. test_any_type_allows_everything
+async def test_any_type_allows_everything(vault: AsyncVault):
+    """produces with Any type should allow any value."""
+    vault.register_agent(AgentContract(
+        name="flexible",
+        produces={"data": Any},
+    ))
+    vault.set_enforcement("strict")
+
+    await vault.put("data", "string", agent="flexible")
+    await vault.put("data", 42, agent="flexible")
+    await vault.put("data", [1, 2], agent="flexible")
+
+
+# 19. test_empty_list_matches_generic
+async def test_empty_list_matches_generic(vault: AsyncVault):
+    """An empty list should match list[str]."""
+    vault.register_agent(AgentContract(
+        name="indexer",
+        produces={"tags": list[str]},
+    ))
+    vault.set_enforcement("strict")
+
+    entry = await vault.put("tags", [], agent="indexer")
+    assert entry.value == []

@@ -264,8 +264,7 @@ class AsyncVault:
         if isinstance(keys, str):
             keys = [keys]
 
-        queue: asyncio.Queue[WatchEvent | None] = asyncio.Queue()
-        self._watchers.append(queue)
+        queue = self._add_watcher()
 
         try:
             while True:
@@ -275,13 +274,34 @@ class AsyncVault:
                 if keys is None or event.key in keys:
                     yield event
         finally:
-            if queue in self._watchers:
-                self._watchers.remove(queue)
+            self._remove_watcher(queue)
+
+    def _add_watcher(self, maxsize: int = 1000) -> asyncio.Queue[WatchEvent | None]:
+        """Register a new watcher queue. Used by watch() and ReactiveEngine."""
+        queue: asyncio.Queue[WatchEvent | None] = asyncio.Queue(maxsize=maxsize)
+        self._watchers.append(queue)
+        return queue
+
+    def _remove_watcher(self, queue: asyncio.Queue[WatchEvent | None]) -> None:
+        """Unregister a watcher queue."""
+        if queue in self._watchers:
+            self._watchers.remove(queue)
 
     async def _notify(self, event: WatchEvent) -> None:
         """Notify all watchers of a change."""
         for queue in self._watchers:
-            await queue.put(event)
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                # Drop oldest event to make room (backpressure)
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                try:
+                    queue.put_nowait(event)
+                except asyncio.QueueFull:
+                    pass
 
     async def close(self) -> None:
         """Close the vault and release resources."""

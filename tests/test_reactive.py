@@ -279,3 +279,54 @@ async def test_concurrent_handlers(vault: AsyncVault):
     await vault.stop()
     assert a == "a"
     assert b == "b"
+
+
+# 15. test_handler_timeout
+async def test_handler_timeout(vault: AsyncVault, caplog):
+    """Handlers that exceed timeout should be cancelled and logged."""
+    engine = vault._ensure_reactive()
+    engine._handler_timeout = 0.2  # 200ms timeout
+
+    @vault.on_update("slow_input", produces="slow_output")
+    async def slow_handler(value, event):
+        await asyncio.sleep(5.0)  # Way longer than timeout
+        return "should not reach"
+
+    await vault.start()
+    with caplog.at_level(logging.ERROR):
+        await vault.put("slow_input", "data", agent="test")
+        await asyncio.sleep(0.5)
+    await vault.stop()
+
+    assert await vault.get("slow_output") is None
+    assert "timed out" in caplog.text
+
+
+# 16. test_handler_with_type_annotated_vault
+async def test_handler_with_type_annotated_vault(vault: AsyncVault):
+    """Handler with type-annotated vault param should receive vault reference."""
+    @vault.on_update("input", produces="output")
+    async def handler(v: AsyncVault, event):
+        val = await v.get("input")
+        return f"read: {val}"
+
+    await vault.start()
+    await vault.put("input", "hello", agent="test")
+    result = await _wait_for_key(vault, "output")
+    await vault.stop()
+    assert result == "read: hello"
+
+
+# 17. test_handler_with_short_param_name
+async def test_handler_with_short_param_name(vault: AsyncVault):
+    """Handler with param named 'v' should receive vault reference."""
+    @vault.on_update("input", produces="output")
+    async def handler(v, event):
+        val = await v.get("input")
+        return f"via v: {val}"
+
+    await vault.start()
+    await vault.put("input", "world", agent="test")
+    result = await _wait_for_key(vault, "output")
+    await vault.stop()
+    assert result == "via v: world"

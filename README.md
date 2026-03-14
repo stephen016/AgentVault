@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://github.com/stephen016/AgentVault/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python 3.10+">
-  <img src="https://img.shields.io/badge/tests-129%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-136%20passed-brightgreen" alt="Tests">
   <img src="https://img.shields.io/badge/dependencies-2-green" alt="Dependencies">
 </p>
 
@@ -351,7 +351,7 @@ report                         writer          1        2026-03-14 15:34:49     
 git clone https://github.com/stephen016/AgentVault.git
 cd AgentVault
 pip install -e ".[dev]"
-pytest                    # 129 tests
+pytest                    # 136 tests
 ruff check src/ tests/    # linting
 ```
 

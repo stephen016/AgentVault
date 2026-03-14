@@ -12,6 +12,9 @@ from agentvault.types import WatchEvent
 
 logger = logging.getLogger(__name__)
 
+# Default timeout for handler execution (seconds)
+DEFAULT_HANDLER_TIMEOUT = 30.0
+
 
 @dataclass
 class Handler:
@@ -21,6 +24,7 @@ class Handler:
     watches: list[str]
     produces: str
     fn: Callable[..., Coroutine[Any, Any, Any]]
+    _wants_vault: bool = False  # True if first param is type-hinted as vault
 
 
 class ReactiveEngine:
@@ -30,9 +34,16 @@ class ReactiveEngine:
     other keys, enabling dataflow-style reactive pipelines.
     """
 
-    def __init__(self, vault: Any, *, max_depth: int = 10) -> None:
+    def __init__(
+        self,
+        vault: Any,
+        *,
+        max_depth: int = 10,
+        handler_timeout: float = DEFAULT_HANDLER_TIMEOUT,
+    ) -> None:
         self._vault = vault
         self._max_depth = max_depth
+        self._handler_timeout = handler_timeout
         self._handlers: list[Handler] = []
         self._task: asyncio.Task[None] | None = None
         self._running = False
@@ -55,11 +66,13 @@ class ReactiveEngine:
             )
 
         handler_name = name or fn.__name__
+        wants_vault = _detect_wants_vault(fn)
         self._handlers.append(Handler(
             name=handler_name,
             watches=watch_list,
             produces=produces,
             fn=fn,
+            _wants_vault=wants_vault,
         ))
 
     def on_update(
@@ -144,11 +157,9 @@ class ReactiveEngine:
     async def _run_loop(self) -> None:
         """Main watch loop — dispatches events to matching handlers.
 
-        Directly registers a queue with the vault's watcher list to avoid
-        race conditions with async generator setup.
+        Uses the vault's public _add_watcher/_remove_watcher API.
         """
-        queue: asyncio.Queue[Any] = asyncio.Queue()
-        self._vault._watchers.append(queue)
+        queue = self._vault._add_watcher()
 
         # Signal that the watch queue is registered and we're ready
         if self._started_event:
@@ -163,8 +174,7 @@ class ReactiveEngine:
         except asyncio.CancelledError:
             pass
         finally:
-            if queue in self._vault._watchers:
-                self._vault._watchers.remove(queue)
+            self._vault._remove_watcher(queue)
 
     async def _dispatch(self, event: WatchEvent) -> None:
         """Find handlers whose watches match the event key and run them."""
@@ -179,8 +189,10 @@ class ReactiveEngine:
             )
             return
 
+        # Snapshot handlers to avoid issues if registration happens concurrently
+        handlers = list(self._handlers)
         tasks = []
-        for handler in self._handlers:
+        for handler in handlers:
             if event.key in handler.watches:
                 tasks.append(
                     asyncio.create_task(
@@ -194,16 +206,14 @@ class ReactiveEngine:
     async def _execute_handler(
         self, handler: Handler, event: WatchEvent, depth: int
     ) -> None:
-        """Run a single handler and put its result if not None."""
+        """Run a single handler with timeout and put its result if not None."""
         try:
-            # Auto-detect call signature
-            sig = inspect.signature(handler.fn)
-            params = list(sig.parameters.keys())
-
-            if len(params) >= 1 and params[0] in ("vault_ref", "vault"):
-                result = await handler.fn(self._vault, event)
+            if handler._wants_vault:
+                coro = handler.fn(self._vault, event)
             else:
-                result = await handler.fn(event.new_value, event)
+                coro = handler.fn(event.new_value, event)
+
+            result = await asyncio.wait_for(coro, timeout=self._handler_timeout)
 
             if result is not None:
                 await self._vault.put(
@@ -212,8 +222,43 @@ class ReactiveEngine:
                     agent=handler.name,
                     _trigger_depth=depth + 1,
                 )
+        except asyncio.TimeoutError:
+            logger.error(
+                f"Reactive handler '{handler.name}' timed out after "
+                f"{self._handler_timeout}s on key '{event.key}'"
+            )
         except Exception:
             logger.exception(
                 f"Error in reactive handler '{handler.name}' "
                 f"triggered by key '{event.key}'"
             )
+
+
+def _detect_wants_vault(fn: Callable) -> bool:
+    """Detect if a handler wants the vault reference as its first argument.
+
+    Uses type annotations first, then falls back to parameter name heuristic.
+    """
+    try:
+        sig = inspect.signature(fn)
+        params = list(sig.parameters.values())
+        if not params:
+            return False
+
+        first = params[0]
+
+        # Check type annotation
+        if first.annotation is not inspect.Parameter.empty:
+            ann = first.annotation
+            # Handle string annotations
+            if isinstance(ann, str):
+                ann_lower = ann.lower()
+                return "vault" in ann_lower or "asyncvault" in ann_lower
+            # Handle actual type references
+            type_name = getattr(ann, "__name__", str(ann)).lower()
+            return "vault" in type_name
+
+        # Fallback: check parameter name
+        return first.name in ("vault_ref", "vault", "vault_instance", "v")
+    except (ValueError, TypeError):
+        return False

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from agentvault.exceptions import LockError
+from agentvault.exceptions import ConflictError, LockError
 
 
 class VaultLock:
@@ -43,7 +44,10 @@ class VaultLock:
         self._lock_id = str(uuid.uuid4())
 
     async def acquire(self) -> bool:
-        """Try to acquire the lock. Returns True if successful."""
+        """Try to acquire the lock. Returns True if successful.
+
+        Raises LockError if the lock cannot be acquired within the timeout.
+        """
         deadline = datetime.now(timezone.utc) + timedelta(seconds=self._timeout)
 
         while datetime.now(timezone.utc) < deadline:
@@ -51,15 +55,16 @@ class VaultLock:
             result = await self._vault._backend.get(self._lock_key)
 
             if result is None:
-                # No lock — try to create it
+                # No lock — try to create it via CAS (expected_version=0)
                 try:
-                    expires_at = datetime.now(timezone.utc) + timedelta(seconds=self._timeout)
+                    expires_at = datetime.now(timezone.utc) + timedelta(
+                        seconds=self._timeout
+                    )
                     lock_data = {
                         "holder": self._holder,
                         "lock_id": self._lock_id,
                         "expires_at": expires_at.isoformat(),
                     }
-                    import json
                     await self._vault._backend.put(
                         self._lock_key,
                         json.dumps(lock_data),
@@ -68,20 +73,21 @@ class VaultLock:
                         expected_version=0,
                     )
                     return True
-                except Exception:
-                    # Someone else grabbed it first — retry
+                except ConflictError:
+                    # Someone else grabbed it between our check and create
                     await asyncio.sleep(self._poll_interval)
                     continue
 
             # Lock exists — check if expired
-            import json
             lock_data = json.loads(result[0])
             expires_at = datetime.fromisoformat(lock_data["expires_at"])
 
             if datetime.now(timezone.utc) >= expires_at:
-                # Lock expired — try to take it over
+                # Lock expired — try to take it over via CAS
                 try:
-                    new_expires = datetime.now(timezone.utc) + timedelta(seconds=self._timeout)
+                    new_expires = datetime.now(timezone.utc) + timedelta(
+                        seconds=self._timeout
+                    )
                     new_lock_data = {
                         "holder": self._holder,
                         "lock_id": self._lock_id,
@@ -95,7 +101,8 @@ class VaultLock:
                         expected_version=result[2].version,
                     )
                     return True
-                except Exception:
+                except ConflictError:
+                    # Someone else took over the expired lock
                     await asyncio.sleep(self._poll_interval)
                     continue
 
@@ -108,7 +115,6 @@ class VaultLock:
         """Release the lock. Only releases if we hold it."""
         result = await self._vault._backend.get(self._lock_key)
         if result is not None:
-            import json
             lock_data = json.loads(result[0])
             if lock_data.get("lock_id") == self._lock_id:
                 await self._vault._backend.delete(self._lock_key)

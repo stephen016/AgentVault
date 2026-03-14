@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Literal
+from typing import Any, Literal, get_args, get_origin
 
 from agentvault.exceptions import ContractViolationError
 from agentvault.types import AgentContract
@@ -11,6 +11,64 @@ from agentvault.types import AgentContract
 logger = logging.getLogger(__name__)
 
 EnforcementMode = Literal["strict", "warn", "off"]
+
+
+def _check_type(value: Any, expected: Any) -> bool:
+    """Check if value matches expected type, including generics like list[str].
+
+    Returns True if the value matches, False otherwise.
+    """
+    if expected is Any:
+        return True
+
+    origin = get_origin(expected)
+
+    if origin is None:
+        # Plain type like str, int, dict
+        return isinstance(value, expected)
+
+    # Generic type like list[str], dict[str, int]
+    if not isinstance(value, origin):
+        return False
+
+    type_args = get_args(expected)
+    if not type_args:
+        return True
+
+    # Validate inner types
+    if origin is list:
+        inner = type_args[0]
+        return all(_check_type(item, inner) for item in value)
+    elif origin is dict:
+        key_type, val_type = type_args
+        return all(
+            _check_type(k, key_type) and _check_type(v, val_type)
+            for k, v in value.items()
+        )
+    elif origin is set:
+        inner = type_args[0]
+        return all(_check_type(item, inner) for item in value)
+    elif origin is tuple:
+        if len(type_args) == 2 and type_args[1] is Ellipsis:
+            return all(_check_type(item, type_args[0]) for item in value)
+        if len(value) != len(type_args):
+            return False
+        return all(_check_type(v, t) for v, t in zip(value, type_args))
+
+    # For other generic types, just check the origin
+    return True
+
+
+def _type_name(t: Any) -> str:
+    """Get a readable name for a type, including generics."""
+    origin = get_origin(t)
+    if origin is None:
+        return getattr(t, "__name__", str(t))
+    args = get_args(t)
+    if args:
+        arg_names = ", ".join(_type_name(a) for a in args if a is not Ellipsis)
+        return f"{origin.__name__}[{arg_names}]"
+    return origin.__name__
 
 
 class ContractRegistry:
@@ -62,12 +120,13 @@ class ContractRegistry:
             self._handle_violation(agent, key, f"key '{key}' not in declared produces")
             return
 
-        # Check type matches
+        # Check type matches (supports generics like list[str])
         expected_type = contract.produces[key]
-        if expected_type is not Any and not isinstance(value, expected_type):
+        if not _check_type(value, expected_type):
             self._handle_violation(
                 agent, key,
-                f"expected type {expected_type.__name__}, got {type(value).__name__}"
+                f"expected type {_type_name(expected_type)}, "
+                f"got {type(value).__name__}"
             )
 
     def _handle_violation(self, agent: str, key: str, reason: str) -> None:
@@ -132,8 +191,8 @@ class ContractRegistry:
                         ):
                             issues.append(
                                 f"Type mismatch on key '{key}': "
-                                f"'{prod_agent}' produces {prod_type.__name__}, "
-                                f"'{cons_agent}' consumes {cons_type.__name__}"
+                                f"'{prod_agent}' produces {_type_name(prod_type)}, "
+                                f"'{cons_agent}' consumes {_type_name(cons_type)}"
                             )
 
         return issues
