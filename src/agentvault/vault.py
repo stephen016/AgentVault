@@ -113,6 +113,31 @@ class Vault:
         return self._run(vault.clear())
 
     @contextmanager
+    def lock(
+        self,
+        key: str,
+        *,
+        holder: str = "default",
+        timeout: float = 30.0,
+    ) -> Generator[None, None, None]:
+        """Distributed lock as a sync context manager.
+
+        Usage:
+            with vault.lock("shared-resource", holder="agent-1"):
+                data = vault.get("shared-resource")
+                vault.put("shared-resource", transform(data))
+        """
+        from agentvault.lock import VaultLock
+
+        vault = self._ensure_vault()
+        lk = VaultLock(vault, key, holder=holder, timeout=timeout)
+        self._run(lk.acquire())
+        try:
+            yield
+        finally:
+            self._run(lk.release())
+
+    @contextmanager
     def as_agent(self, agent: str) -> Generator[Vault, None, None]:
         """Context manager that auto-tags writes with the given agent name.
 
