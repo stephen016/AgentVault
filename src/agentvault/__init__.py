@@ -1,18 +1,33 @@
 """AgentVault — Shared memory and state coordination for AI agents."""
 
 from agentvault.async_vault import AsyncVault
-from agentvault.exceptions import AgentVaultError, ConflictError, LockError, SerializationError
-from agentvault.types import Entry, WatchEvent
+from agentvault.contracts import ContractRegistry, EnforcementMode
+from agentvault.exceptions import (
+    AgentVaultError,
+    ConflictError,
+    ContractViolationError,
+    LockError,
+    ReactiveLoopError,
+    SerializationError,
+)
+from agentvault.reactive import ReactiveEngine
+from agentvault.types import AgentContract, Entry, WatchEvent
 from agentvault.vault import Vault
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
     "AsyncVault",
     "Vault",
     "Entry",
     "WatchEvent",
+    "AgentContract",
     "AgentVaultError",
     "ConflictError",
+    "ContractViolationError",
     "LockError",
+    "ReactiveLoopError",
     "SerializationError",
+    "ContractRegistry",
+    "EnforcementMode",
+    "ReactiveEngine",
 ]

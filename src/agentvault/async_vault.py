@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, AsyncIterator, Type
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Type
+
+if TYPE_CHECKING:
+    from agentvault.reactive import ReactiveEngine
 
 from pydantic import BaseModel
 
 from agentvault.backends.base import Backend
+from agentvault.contracts import ContractRegistry, EnforcementMode
 from agentvault.serialization import deserialize, serialize
-from agentvault.types import Entry, WatchEvent
+from agentvault.types import AgentContract, Entry, WatchEvent
 
 
 class AsyncVault:
@@ -26,6 +30,8 @@ class AsyncVault:
     def __init__(self, backend: Backend) -> None:
         self._backend = backend
         self._watchers: list[asyncio.Queue[WatchEvent | None]] = []
+        self._contracts = ContractRegistry()
+        self._reactive: ReactiveEngine | None = None
 
     @classmethod
     async def connect(
@@ -45,6 +51,61 @@ class AsyncVault:
         resolved = _resolve_backend(backend, name, path)
         return cls(resolved)
 
+    # --- Contract Methods ---
+
+    def register_agent(self, contract: AgentContract) -> None:
+        """Register an agent contract for validation."""
+        self._contracts.register(contract)
+
+    def set_enforcement(self, mode: EnforcementMode) -> None:
+        """Set contract enforcement mode: 'strict', 'warn', or 'off'."""
+        self._contracts.enforcement = mode
+
+    def get_dependency_graph(self) -> dict:
+        """Return the agent dependency graph."""
+        return self._contracts.get_dependency_graph()
+
+    def validate_contracts(self) -> list[str]:
+        """Check for structural issues across all registered contracts."""
+        return self._contracts.validate_contracts()
+
+    # --- Reactive Methods ---
+
+    def _ensure_reactive(self) -> ReactiveEngine:
+        if self._reactive is None:
+            from agentvault.reactive import ReactiveEngine
+            self._reactive = ReactiveEngine(self)
+        return self._reactive
+
+    def on_update(
+        self,
+        watches: str | list[str],
+        *,
+        produces: str,
+        name: str | None = None,
+    ) -> Callable:
+        """Decorator to register a reactive handler.
+
+        Usage:
+            @vault.on_update("research_findings", produces="summary")
+            async def summarize(value, event):
+                return await llm.call("Summarize: " + str(value))
+        """
+        engine = self._ensure_reactive()
+        return engine.on_update(watches, produces=produces, name=name)
+
+    async def start(self) -> None:
+        """Start the reactive engine."""
+        if self._reactive is not None:
+            await self._reactive.start()
+
+    async def stop(self) -> None:
+        """Stop the reactive engine."""
+        if self._reactive is not None:
+            await self._reactive.stop()
+
+    # --- Core Methods ---
+
     async def put(
         self,
         key: str,
@@ -54,6 +115,7 @@ class AsyncVault:
         expected_version: int | None = None,
         ttl: int | None = None,
         metadata: dict[str, Any] | None = None,
+        _trigger_depth: int = 0,
     ) -> Entry:
         """Store a value in the vault.
 
@@ -64,10 +126,14 @@ class AsyncVault:
             expected_version: For compare-and-swap. Raises ConflictError on mismatch.
             ttl: Time-to-live in seconds. None means no expiration.
             metadata: Optional metadata dict.
+            _trigger_depth: Internal — tracks reactive chain depth.
 
         Returns:
             The Entry that was created or updated.
         """
+        # Validate against agent contracts
+        self._contracts.validate_put(agent, key, value)
+
         value_json, type_hint = serialize(value)
 
         # Get old value for watch notification
@@ -87,14 +153,16 @@ class AsyncVault:
         )
 
         # Notify watchers
-        await self._notify(WatchEvent(
+        event = WatchEvent(
             key=key,
             new_value=entry.value,
             old_value=old_value,
             agent=agent,
             version=entry.version,
             event_type="put",
-        ))
+        )
+        event._trigger_depth = _trigger_depth
+        await self._notify(event)
 
         return entry
 
@@ -217,6 +285,8 @@ class AsyncVault:
 
     async def close(self) -> None:
         """Close the vault and release resources."""
+        # Stop reactive engine first
+        await self.stop()
         # Signal all watchers to stop
         for queue in self._watchers:
             await queue.put(None)

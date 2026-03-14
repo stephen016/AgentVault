@@ -33,3 +33,24 @@ class LockError(AgentVaultError):
 
 class SerializationError(AgentVaultError):
     """Raised when a value cannot be serialized or deserialized."""
+
+
+class ContractViolationError(AgentVaultError):
+    """Raised when an agent violates its declared contract."""
+
+    def __init__(self, agent: str, key: str, reason: str) -> None:
+        self.agent = agent
+        self.key = key
+        self.reason = reason
+        super().__init__(f"Contract violation by '{agent}' on key '{key}': {reason}")
+
+
+class ReactiveLoopError(AgentVaultError):
+    """Raised when a reactive handler chain exceeds max depth."""
+
+    def __init__(self, key: str, depth: int) -> None:
+        self.key = key
+        self.depth = depth
+        super().__init__(
+            f"Reactive loop detected on key '{key}': depth {depth} exceeded max"
+        )

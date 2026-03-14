@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://github.com/stephen016/AgentVault/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python 3.10+">
-  <img src="https://img.shields.io/badge/tests-100%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-129%20passed-brightgreen" alt="Tests">
   <img src="https://img.shields.io/badge/dependencies-2-green" alt="Dependencies">
 </p>
 
@@ -108,6 +108,8 @@ for entry in vault.history("findings"):
 | **Watch changes** | `async for event in vault.watch("key"):` |
 | **Agent context** | `with vault.as_agent("researcher") as v:` |
 | **Audit trail** | `vault.history("key")` |
+| **Reactive pipelines** | `@vault.on_update("input", produces="output")` |
+| **Agent contracts** | `vault.register_agent(AgentContract(...))` |
 | **CLI inspector** | `agentvault inspect my-workflow` |
 
 ---
@@ -198,6 +200,85 @@ for entry in vault.history("findings"):
     print(f"v{entry.version} by {entry.agent} at {entry.updated_at}")
 ```
 
+---
+
+## Reactive Coordination (v0.2)
+
+Dataflow-style pipelines where updating one key automatically triggers handler functions that produce other keys. Like Kafka meets React's `useState`, but for AI agents.
+
+```python
+vault = await AsyncVault.connect("my-workflow")
+
+@vault.on_update("research_findings", produces="summary")
+async def summarize(value, event):
+    return await llm.call("Summarize: " + str(value))
+
+@vault.on_update("summary", produces="report")
+async def write_report(value, event):
+    return await llm.call("Write report: " + value)
+
+# Multi-key join: fires when either changes, produces when both ready
+@vault.on_update(["findings_a", "findings_b"], produces="combined")
+async def combine(vault_ref, event):
+    a = await vault_ref.get("findings_a")
+    b = await vault_ref.get("findings_b")
+    return {"merged": [a, b]} if a and b else None
+
+await vault.start()
+await vault.put("research_findings", data, agent="researcher")
+# -> summary auto-generated -> report auto-generated (chain)
+await vault.stop()
+```
+
+**Features:**
+- **Handler chaining**: A -> B -> C pipelines with automatic propagation
+- **Multi-key joins**: Watch multiple keys, fire when any changes
+- **Loop detection**: Configurable `max_depth` prevents infinite chains
+- **Self-loop rejection**: `produces` in `watches` raises `ValueError` at registration
+- **Error isolation**: Handler exceptions are logged, never crash the engine
+- **Cycle detection**: `engine.detect_cycles()` finds potential infinite loops
+- **Graph visualization**: `engine.get_graph()` shows handler dependencies
+
+## Agent Contracts (v0.2)
+
+Typed declarations of what each agent produces and consumes, validated at runtime. Makes coordination self-documenting and error-proof.
+
+```python
+from agentvault import AgentContract
+
+vault.register_agent(AgentContract(
+    name="researcher",
+    produces={"findings": dict, "scratch": str},
+    consumes={"plan": str},
+))
+
+vault.register_agent(AgentContract(
+    name="writer",
+    produces={"report": str},
+    consumes={"findings": dict},
+))
+
+vault.set_enforcement("strict")
+
+# Violations caught at runtime:
+with vault.as_agent("writer"):
+    vault.put("findings", data)  # ContractViolationError: not in produces
+    vault.put("report", 42)      # ContractViolationError: expected str
+
+# Structural validation:
+issues = vault.validate_contracts()
+# -> ["Key 'plan' consumed by 'researcher' but no agent produces it"]
+
+graph = vault.get_dependency_graph()
+```
+
+**Enforcement modes:**
+- `"off"` (default) — no validation
+- `"warn"` — log violations, don't raise
+- `"strict"` — raise `ContractViolationError` on any violation
+
+---
+
 ## Async API
 
 AgentVault is async-first. The `Vault` class is a sync convenience wrapper.
@@ -245,6 +326,8 @@ report                         writer          1        2026-03-14 15:34:49     
 | **Typed state** | Pydantic native | No | No | TypedDict |
 | **Version history** | Built-in | Partial | No | Checkpoints only |
 | **CAS / Locks** | Built-in | No | Manual | No |
+| **Reactive pipelines** | Built-in | No | Pub/sub only | Graph-based |
+| **Agent contracts** | Built-in | No | No | No |
 | **Framework-agnostic** | Yes | Yes | Yes | LangChain only |
 | **Zero config** | SQLite default | Needs vector DB | Needs Redis server | Needs LangChain |
 | **TTL** | Built-in | No | Built-in | No |
@@ -259,6 +342,8 @@ report                         writer          1        2026-03-14 15:34:49     
 | [`03_multi_agent_coordination.py`](examples/03_multi_agent_coordination.py) | Locks, watch, TTL |
 | [`04_langgraph_integration.py`](examples/04_langgraph_integration.py) | Cross-workflow shared state |
 | [`05_real_world_research_team.py`](examples/05_real_world_research_team.py) | **Full multi-agent pipeline** |
+| [`06_reactive_pipeline.py`](examples/06_reactive_pipeline.py) | Reactive dataflow chains, multi-key joins |
+| [`07_agent_contracts.py`](examples/07_agent_contracts.py) | Contract validation, enforcement modes |
 
 ## Contributing
 
@@ -266,7 +351,7 @@ report                         writer          1        2026-03-14 15:34:49     
 git clone https://github.com/stephen016/AgentVault.git
 cd AgentVault
 pip install -e ".[dev]"
-pytest                    # 100 tests
+pytest                    # 129 tests
 ruff check src/ tests/    # linting
 ```
 

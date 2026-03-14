@@ -9,7 +9,8 @@ from typing import Any, Generator, Type
 from pydantic import BaseModel
 
 from agentvault.async_vault import AsyncVault, _resolve_backend
-from agentvault.types import Entry
+from agentvault.contracts import EnforcementMode
+from agentvault.types import AgentContract, Entry
 
 
 class Vault:
@@ -136,6 +137,51 @@ class Vault:
             yield
         finally:
             self._run(lk.release())
+
+    # --- Contract Methods ---
+
+    def register_agent(self, contract: AgentContract) -> None:
+        """Register an agent contract for validation."""
+        vault = self._ensure_vault()
+        vault.register_agent(contract)
+
+    def set_enforcement(self, mode: EnforcementMode) -> None:
+        """Set contract enforcement mode."""
+        vault = self._ensure_vault()
+        vault.set_enforcement(mode)
+
+    def get_dependency_graph(self) -> dict:
+        """Return the agent dependency graph."""
+        vault = self._ensure_vault()
+        return vault.get_dependency_graph()
+
+    def validate_contracts(self) -> list[str]:
+        """Check for structural issues across all registered contracts."""
+        vault = self._ensure_vault()
+        return vault.validate_contracts()
+
+    # --- Reactive Methods ---
+
+    def on_update(
+        self,
+        watches: str | list[str],
+        *,
+        produces: str,
+        name: str | None = None,
+    ):
+        """Decorator to register a reactive handler (async functions only)."""
+        vault = self._ensure_vault()
+        return vault.on_update(watches, produces=produces, name=name)
+
+    def start_reactive(self) -> None:
+        """Start the reactive engine."""
+        vault = self._ensure_vault()
+        self._run(vault.start())
+
+    def stop_reactive(self) -> None:
+        """Stop the reactive engine."""
+        vault = self._ensure_vault()
+        self._run(vault.stop())
 
     @contextmanager
     def as_agent(self, agent: str) -> Generator[Vault, None, None]:

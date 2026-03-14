@@ -30,3 +30,13 @@ class WatchEvent(BaseModel):
     version: int
     event_type: Literal["put", "delete"]
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    _trigger_depth: int = 0
+
+
+class AgentContract(BaseModel):
+    """Declares what keys an agent produces and consumes, with expected types."""
+
+    name: str
+    produces: dict[str, Any] = Field(default_factory=dict)
+    consumes: dict[str, Any] = Field(default_factory=dict)
+    description: str = ""
