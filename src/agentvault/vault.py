@@ -8,7 +8,8 @@ from typing import Any, Generator, Type
 
 from pydantic import BaseModel
 
-from agentvault.async_vault import AsyncVault, _resolve_backend
+from agentvault.async_vault import AsyncVault, _active_agent, _resolve_backend
+from agentvault.capabilities import Capability
 from agentvault.causality import SyncCausalContext
 from agentvault.contracts import EnforcementMode
 from agentvault.merge import MergeFunction
@@ -162,6 +163,28 @@ class Vault:
         vault = self._ensure_vault()
         return vault.validate_contracts()
 
+    # --- Capability Methods ---
+
+    def grant_capability(self, capability: Capability) -> None:
+        """Grant a capability to an agent."""
+        vault = self._ensure_vault()
+        vault.grant_capability(capability)
+
+    def revoke_capability(self, agent: str) -> bool:
+        """Revoke an agent's capability."""
+        vault = self._ensure_vault()
+        return vault.revoke_capability(agent)
+
+    def enable_capabilities(self, enabled: bool = True) -> None:
+        """Enable or disable capability enforcement."""
+        vault = self._ensure_vault()
+        vault.enable_capabilities(enabled)
+
+    def describe_capabilities(self) -> dict:
+        """Return a description of all capabilities."""
+        vault = self._ensure_vault()
+        return vault.describe_capabilities()
+
     # --- Merge Methods ---
 
     def set_merge_strategy(
@@ -216,16 +239,20 @@ class Vault:
     def as_agent(self, agent: str) -> Generator[Vault, None, None]:
         """Context manager that auto-tags writes with the given agent name.
 
+        Also sets the active agent for capability-based read checks.
+
         Usage:
             with vault.as_agent("researcher") as v:
                 v.put("notes", "...")  # agent="researcher" implied
         """
         prev = self._default_agent
         self._default_agent = agent
+        token = _active_agent.set(agent)
         try:
             yield self
         finally:
             self._default_agent = prev
+            _active_agent.reset(token)
 
     def close(self) -> None:
         """Close the vault and release resources."""

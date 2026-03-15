@@ -1,6 +1,7 @@
 """AgentVault — Shared memory and state coordination for AI agents."""
 
 from agentvault.async_vault import AsyncVault
+from agentvault.capabilities import Capability, CapabilityError, CapabilityManager
 from agentvault.causality import CausalContext, CausalTracker, get_causal_deps
 from agentvault.contracts import ContractRegistry, EnforcementMode
 from agentvault.exceptions import (
@@ -44,4 +45,7 @@ __all__ = [
     "dict_deep_merge",
     "list_append",
     "last_write_wins",
+    "Capability",
+    "CapabilityError",
+    "CapabilityManager",
 ]

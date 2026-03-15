@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Type
-
-if TYPE_CHECKING:
-    from agentvault.reactive import ReactiveEngine
 
 from pydantic import BaseModel
 
 from agentvault.backends.base import Backend
+from agentvault.capabilities import Capability, CapabilityManager
 from agentvault.causality import (
     CAUSAL_DEPS_KEY,
     CausalContext,
@@ -22,6 +21,14 @@ from agentvault.exceptions import ConflictError
 from agentvault.merge import MergeFunction, MergeRegistry
 from agentvault.serialization import deserialize, serialize
 from agentvault.types import AgentContract, Entry, WatchEvent
+
+if TYPE_CHECKING:
+    from agentvault.reactive import ReactiveEngine
+
+# Task-local active agent for capability checks on reads
+_active_agent: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_active_agent", default=None
+)
 
 
 class AsyncVault:
@@ -42,6 +49,7 @@ class AsyncVault:
         self._reactive: ReactiveEngine | None = None
         self._causal = CausalTracker()
         self._merges = MergeRegistry()
+        self._capabilities = CapabilityManager()
 
     @classmethod
     async def connect(
@@ -78,6 +86,47 @@ class AsyncVault:
     def validate_contracts(self) -> list[str]:
         """Check for structural issues across all registered contracts."""
         return self._contracts.validate_contracts()
+
+    # --- Agent Context ---
+
+    def as_agent(self, agent: str) -> _AsyncAgentContext:
+        """Async context manager that sets the active agent for operations.
+
+        Within this context, get() enforces read capabilities and put()
+        auto-tags writes with the agent name.
+
+        Usage:
+            async with vault.as_agent("researcher"):
+                data = await vault.get("plan")      # read checked
+                await vault.put("findings", data)    # agent auto-tagged
+        """
+        return _AsyncAgentContext(agent)
+
+    # --- Capability Methods ---
+
+    def grant_capability(self, capability: Capability) -> None:
+        """Grant a capability to an agent.
+
+        Usage:
+            vault.grant_capability(Capability(
+                agent="researcher",
+                read={"plan", "config"},
+                write={"findings", "scratch_*"},
+            ))
+        """
+        self._capabilities.grant(capability)
+
+    def revoke_capability(self, agent: str) -> bool:
+        """Revoke an agent's capability."""
+        return self._capabilities.revoke(agent)
+
+    def enable_capabilities(self, enabled: bool = True) -> None:
+        """Enable or disable capability enforcement."""
+        self._capabilities.enabled = enabled
+
+    def describe_capabilities(self) -> dict:
+        """Return a human-readable description of all capabilities."""
+        return self._capabilities.describe()
 
     # --- Merge Methods ---
 
@@ -285,6 +334,13 @@ class AsyncVault:
         Returns:
             The Entry that was created or updated.
         """
+        # Use active agent if no explicit agent provided
+        if agent is None:
+            agent = _active_agent.get()
+
+        # Enforce capability-based access control
+        self._capabilities.check_write(agent, key)
+
         # Validate against agent contracts
         self._contracts.validate_put(agent, key, value)
 
@@ -363,6 +419,10 @@ class AsyncVault:
         Returns:
             The deserialized value, or default if not found.
         """
+        # Enforce read capability for the active agent
+        active = _active_agent.get()
+        self._capabilities.check_read(active, key)
+
         result = await self._backend.get(key)
         if result is None:
             return default
@@ -376,6 +436,10 @@ class AsyncVault:
 
         Returns None if key is not found.
         """
+        # Enforce read capability for the active agent
+        active = _active_agent.get()
+        self._capabilities.check_read(active, key)
+
         result = await self._backend.get(key)
         if result is None:
             return None
@@ -503,6 +567,23 @@ class AsyncVault:
 
     async def __aexit__(self, *args: Any) -> None:
         await self.close()
+
+
+class _AsyncAgentContext:
+    """Async context manager that sets the active agent."""
+
+    def __init__(self, agent: str) -> None:
+        self._agent = agent
+        self._token: contextvars.Token[str | None] | None = None
+
+    async def __aenter__(self) -> _AsyncAgentContext:
+        self._token = _active_agent.set(self._agent)
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        if self._token is not None:
+            _active_agent.reset(self._token)
+            self._token = None
 
 
 def _resolve_backend(backend: str | Backend, vault_name: str, path: str | None) -> Backend:
