@@ -18,6 +18,8 @@ from agentvault.causality import (
     get_causal_deps,
 )
 from agentvault.contracts import ContractRegistry, EnforcementMode
+from agentvault.exceptions import ConflictError
+from agentvault.merge import MergeFunction, MergeRegistry
 from agentvault.serialization import deserialize, serialize
 from agentvault.types import AgentContract, Entry, WatchEvent
 
@@ -39,6 +41,7 @@ class AsyncVault:
         self._contracts = ContractRegistry()
         self._reactive: ReactiveEngine | None = None
         self._causal = CausalTracker()
+        self._merges = MergeRegistry()
 
     @classmethod
     async def connect(
@@ -75,6 +78,32 @@ class AsyncVault:
     def validate_contracts(self) -> list[str]:
         """Check for structural issues across all registered contracts."""
         return self._contracts.validate_contracts()
+
+    # --- Merge Methods ---
+
+    def set_merge_strategy(
+        self,
+        key: str | None,
+        strategy: MergeFunction | str,
+    ) -> None:
+        """Set a merge strategy for a key or as default.
+
+        When a ConflictError would normally be raised during put(),
+        the merge strategy is applied instead — merging the old and
+        new values automatically.
+
+        Args:
+            key: The key to set strategy for. None sets the default.
+            strategy: A merge function or built-in name:
+                      "last_write_wins", "list_append", "dict_deep_merge".
+
+        Usage:
+            vault.set_merge_strategy("findings", "list_append")
+            vault.set_merge_strategy("config", "dict_deep_merge")
+            vault.set_merge_strategy("scores", my_custom_merge_fn)
+            vault.set_merge_strategy(None, "last_write_wins")  # default
+        """
+        self._merges.set_strategy(key, strategy)
 
     # --- Reactive Methods ---
 
@@ -274,15 +303,34 @@ class AsyncVault:
         if old_result is not None:
             old_value = deserialize(old_result[0], old_result[1])
 
-        entry = await self._backend.put(
-            key,
-            value_json,
-            type_hint,
-            agent=agent,
-            metadata=metadata,
-            expected_version=expected_version,
-            ttl=ttl,
-        )
+        try:
+            entry = await self._backend.put(
+                key,
+                value_json,
+                type_hint,
+                agent=agent,
+                metadata=metadata,
+                expected_version=expected_version,
+                ttl=ttl,
+            )
+        except ConflictError:
+            # Check if a merge strategy can resolve the conflict
+            strategy = self._merges.get_strategy(key)
+            if strategy is None or old_value is None:
+                raise
+
+            # Apply merge strategy
+            merged = strategy(key, old_value, value)
+            merged_json, merged_hint = serialize(merged)
+            entry = await self._backend.put(
+                key,
+                merged_json,
+                merged_hint,
+                agent=agent,
+                metadata=metadata,
+                ttl=ttl,
+                # No expected_version — force write after merge
+            )
 
         # Notify watchers
         event = WatchEvent(

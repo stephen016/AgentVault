@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from agentvault.async_vault import AsyncVault, _resolve_backend
 from agentvault.causality import SyncCausalContext
 from agentvault.contracts import EnforcementMode
+from agentvault.merge import MergeFunction
 from agentvault.types import AgentContract, Entry
 
 
@@ -160,6 +161,17 @@ class Vault:
         """Check for structural issues across all registered contracts."""
         vault = self._ensure_vault()
         return vault.validate_contracts()
+
+    # --- Merge Methods ---
+
+    def set_merge_strategy(
+        self,
+        key: str | None,
+        strategy: MergeFunction | str,
+    ) -> None:
+        """Set a merge strategy for a key or as default."""
+        vault = self._ensure_vault()
+        vault.set_merge_strategy(key, strategy)
 
     # --- Causality Methods ---
 
