@@ -11,6 +11,12 @@ if TYPE_CHECKING:
 from pydantic import BaseModel
 
 from agentvault.backends.base import Backend
+from agentvault.causality import (
+    CAUSAL_DEPS_KEY,
+    CausalContext,
+    CausalTracker,
+    get_causal_deps,
+)
 from agentvault.contracts import ContractRegistry, EnforcementMode
 from agentvault.serialization import deserialize, serialize
 from agentvault.types import AgentContract, Entry, WatchEvent
@@ -32,6 +38,7 @@ class AsyncVault:
         self._watchers: list[asyncio.Queue[WatchEvent | None]] = []
         self._contracts = ContractRegistry()
         self._reactive: ReactiveEngine | None = None
+        self._causal = CausalTracker()
 
     @classmethod
     async def connect(
@@ -104,6 +111,124 @@ class AsyncVault:
         if self._reactive is not None:
             await self._reactive.stop()
 
+    # --- Causality Methods ---
+
+    def track_causality(self) -> CausalContext:
+        """Async context manager to track causal dependencies.
+
+        Within this context, all get() calls record which keys/versions
+        were read. When put() is called, these reads are attached as
+        causal dependencies in the entry's metadata.
+
+        Usage:
+            async with vault.track_causality():
+                data = await vault.get("findings")
+                await vault.put("summary", summarize(data), agent="writer")
+                # summary now has causal_deps={"findings": 3}
+        """
+        return CausalContext()
+
+    async def causal_chain(
+        self, key: str, *, depth: int = 10
+    ) -> list[dict[str, Any]]:
+        """Trace the full causal chain that led to a key's current value.
+
+        Returns a list of nodes from the target key back to its root causes.
+        Each node is a dict with: key, version, agent, causal_deps.
+
+        Args:
+            key: The key to trace from.
+            depth: Maximum depth to traverse (prevents infinite loops).
+        """
+        chain: list[dict[str, Any]] = []
+        visited: set[str] = set()
+        queue: list[tuple[str, int]] = []
+
+        # Start with the current entry
+        entry = await self.get_entry(key)
+        if entry is None:
+            return chain
+
+        deps = get_causal_deps(entry)
+        chain.append({
+            "key": entry.key,
+            "version": entry.version,
+            "agent": entry.agent,
+            "causal_deps": deps,
+        })
+        visited.add(f"{entry.key}@{entry.version}")
+
+        # Add dependencies to explore
+        for dep_key, dep_version in deps.items():
+            queue.append((dep_key, dep_version))
+
+        current_depth = 1
+        while queue and current_depth < depth:
+            next_queue: list[tuple[str, int]] = []
+            for dep_key, dep_version in queue:
+                visit_id = f"{dep_key}@{dep_version}"
+                if visit_id in visited:
+                    continue
+                visited.add(visit_id)
+
+                # Try to find this specific version in history
+                dep_entry = await self._find_version(dep_key, dep_version)
+                if dep_entry is None:
+                    chain.append({
+                        "key": dep_key,
+                        "version": dep_version,
+                        "agent": None,
+                        "causal_deps": {},
+                    })
+                    continue
+
+                dep_deps = get_causal_deps(dep_entry)
+                chain.append({
+                    "key": dep_entry.key,
+                    "version": dep_entry.version,
+                    "agent": dep_entry.agent,
+                    "causal_deps": dep_deps,
+                })
+                for k, v in dep_deps.items():
+                    next_queue.append((k, v))
+
+            queue = next_queue
+            current_depth += 1
+
+        return chain
+
+    async def is_stale(self, key: str) -> bool:
+        """Check if any causal dependency of a key has been updated.
+
+        Returns True if any key that was read to produce this entry
+        has since been updated to a newer version.
+        """
+        entry = await self.get_entry(key)
+        if entry is None:
+            return False
+
+        deps = get_causal_deps(entry)
+        if not deps:
+            return False
+
+        for dep_key, dep_version in deps.items():
+            dep_entry = await self.get_entry(dep_key)
+            if dep_entry is None:
+                # Dependency was deleted — definitely stale
+                return True
+            if dep_entry.version > dep_version:
+                return True
+
+        return False
+
+    async def _find_version(self, key: str, version: int) -> Entry | None:
+        """Find a specific version of a key in history."""
+        entries = await self.history(key)
+        for entry in entries:
+            if entry.version == version:
+                return entry
+        return None
+
     # --- Core Methods ---
 
     async def put(
@@ -133,6 +258,13 @@ class AsyncVault:
         """
         # Validate against agent contracts
         self._contracts.validate_put(agent, key, value)
+
+        # Attach causal dependencies if tracking is active
+        causal_deps = self._causal.collect_deps()
+        if causal_deps:
+            if metadata is None:
+                metadata = {}
+            metadata[CAUSAL_DEPS_KEY] = causal_deps
 
         value_json, type_hint = serialize(value)
 
@@ -186,7 +318,9 @@ class AsyncVault:
         result = await self._backend.get(key)
         if result is None:
             return default
-        value_json, type_hint, _ = result
+        value_json, type_hint, entry = result
+        # Record read for causal tracking
+        self._causal.record_read(key, entry.version)
         return deserialize(value_json, type_hint, model=model)
 
     async def get_entry(self, key: str) -> Entry | None:
@@ -197,7 +331,10 @@ class AsyncVault:
         result = await self._backend.get(key)
         if result is None:
             return None
-        return result[2]
+        entry = result[2]
+        # Record read for causal tracking
+        self._causal.record_read(key, entry.version)
+        return entry
 
     async def delete(self, key: str) -> bool:
         """Delete a key from the vault.

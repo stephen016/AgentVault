@@ -1,6 +1,7 @@
 """AgentVault — Shared memory and state coordination for AI agents."""
 
 from agentvault.async_vault import AsyncVault
+from agentvault.causality import CausalContext, CausalTracker, get_causal_deps
 from agentvault.contracts import ContractRegistry, EnforcementMode
 from agentvault.exceptions import (
     AgentVaultError,
@@ -30,4 +31,7 @@ __all__ = [
     "ContractRegistry",
     "EnforcementMode",
     "ReactiveEngine",
+    "CausalContext",
+    "CausalTracker",
+    "get_causal_deps",
 ]

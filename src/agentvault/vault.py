@@ -9,6 +9,7 @@ from typing import Any, Generator, Type
 from pydantic import BaseModel
 
 from agentvault.async_vault import AsyncVault, _resolve_backend
+from agentvault.causality import SyncCausalContext
 from agentvault.contracts import EnforcementMode
 from agentvault.types import AgentContract, Entry
 
@@ -159,6 +160,22 @@ class Vault:
         """Check for structural issues across all registered contracts."""
         vault = self._ensure_vault()
         return vault.validate_contracts()
+
+    # --- Causality Methods ---
+
+    def track_causality(self) -> SyncCausalContext:
+        """Sync context manager to track causal dependencies."""
+        return SyncCausalContext()
+
+    def causal_chain(self, key: str, *, depth: int = 10) -> list[dict]:
+        """Trace the full causal chain that led to a key's current value."""
+        vault = self._ensure_vault()
+        return self._run(vault.causal_chain(key, depth=depth))
+
+    def is_stale(self, key: str) -> bool:
+        """Check if any causal dependency of a key has been updated."""
+        vault = self._ensure_vault()
+        return self._run(vault.is_stale(key))
 
     # --- Reactive Methods ---
 
